@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check Python syntax
+        run: python -m compileall -q api/app api/tests
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: pip install -r api/requirements.txt pytest httpx
+      - name: Run tests
+        run: python -m pytest tests
+        working-directory: api
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    env:
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+      NAMESPACE: ${{ vars.NAMESPACE }}
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Log in to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USER }}
+          password: ${{ secrets.ACR_TOKEN }}
+      - name: Build and push image
+        run: |
+          IMAGE="${ACR_LOGIN_SERVER}/${NAMESPACE}/shipwave-api:${IMAGE_TAG}"
+          docker build api/ --tag "$IMAGE"
+          docker push "$IMAGE"
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+      NAMESPACE: ${{ vars.NAMESPACE }}
+      IMAGE_TAG: ${{ github.sha }}
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+      KUBECONFIG: ${{ runner.temp }}/kubeconfig
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+      - name: Configure Kubernetes access
+        run: printf '%s' "$KUBECONFIG_B64" | base64 --decode > "$KUBECONFIG"
+      - name: Deploy
+        run: >-
+          helm upgrade --install shipwave-api helm/ -n "${NAMESPACE}"
+          --set image.repository="${ACR_LOGIN_SERVER}/${NAMESPACE}/shipwave-api"
+          --set image.tag="${IMAGE_TAG}" --wait --timeout 3m
